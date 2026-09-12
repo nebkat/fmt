@@ -408,35 +408,43 @@ auto write(OutputIt out, const std::tm& time, const std::locale& loc,
 }
 
 #if FMT_USE_LOCALE
-inline auto is_classic_locale(locale_ref loc) -> bool {
-  return !loc || loc.get<std::locale>() == get_classic_locale();
+// The locale used for localized formatting: the one passed to the formatting
+// function or the global locale if none was passed.
+inline auto get_locale(locale_ref loc, bool localized) -> std::locale {
+  if (!localized) return get_classic_locale();
+  return loc.get<std::locale>();
+}
+
+inline auto is_classic_locale(locale_ref loc, bool localized) -> bool {
+  return !localized || loc.get<std::locale>() == get_classic_locale();
 }
 
 template <typename Char, typename OutputIt>
 auto write_localized_time(OutputIt out, const std::tm& time, locale_ref loc,
-                          char format, char modifier) -> OutputIt {
-  return write<Char>(out, time, loc.get<std::locale>(), format, modifier);
+                          bool localized, char format, char modifier)
+    -> OutputIt {
+  return write<Char>(out, time, get_locale(loc, localized), format, modifier);
 }
 
 template <typename Char, typename OutputIt>
-auto write_localized_str(OutputIt out, string_view sv, locale_ref loc)
-    -> OutputIt {
-  if (!loc) return write_tm_str<Char>(out, sv, get_classic_locale());
-  return write_tm_str<Char>(out, sv, loc.get<std::locale>());
+auto write_localized_str(OutputIt out, string_view sv, locale_ref loc,
+                         bool localized) -> OutputIt {
+  return write_tm_str<Char>(out, sv, get_locale(loc, localized));
 }
 #else
-constexpr auto is_classic_locale(locale_ref) -> bool { return true; }
+constexpr auto is_classic_locale(locale_ref, bool) -> bool { return true; }
 
 // Never called because is_classic_locale() is always true.
 template <typename Char, typename OutputIt>
-auto write_localized_time(OutputIt out, const std::tm&, locale_ref, char, char)
-    -> OutputIt {
+auto write_localized_time(OutputIt out, const std::tm&, locale_ref, bool, char,
+                          char) -> OutputIt {
   return out;
 }
 
 // Zone names are ASCII, so there is nothing to transcode.
 template <typename Char, typename OutputIt>
-auto write_localized_str(OutputIt out, string_view sv, locale_ref) -> OutputIt {
+auto write_localized_str(OutputIt out, string_view sv, locale_ref, bool)
+    -> OutputIt {
   return copy<Char>(sv.data(), sv.data() + sv.size(), out);
 }
 #endif  // FMT_USE_LOCALE
@@ -1080,6 +1088,7 @@ class tm_writer {
   static constexpr int days_per_week = 7;
 
   locale_ref loc_;
+  bool localized_;
   bool is_classic_;
   OutputIt out_;
   const Duration* subsecs_;
@@ -1226,7 +1235,7 @@ class tm_writer {
   template <typename T, FMT_ENABLE_IF(has_tm_zone<T>::value)>
   void format_tz_name(const T& tm) {
     if (!tm.tm_zone) FMT_THROW(format_error("no timezone"));
-    out_ = write_localized_str<Char>(out_, tm.tm_zone, loc_);
+    out_ = write_localized_str<Char>(out_, tm.tm_zone, loc_, localized_);
   }
   template <typename T, FMT_ENABLE_IF(!has_tm_zone<T>::value)>
   void format_tz_name(const T&) {
@@ -1234,14 +1243,16 @@ class tm_writer {
   }
 
   void format_localized(char format, char modifier = 0) {
-    out_ = write_localized_time<Char>(out_, tm_, loc_, format, modifier);
+    out_ = write_localized_time<Char>(out_, tm_, loc_, localized_, format,
+                                     modifier);
   }
 
  public:
-  tm_writer(locale_ref loc, OutputIt out, const std::tm& tm,
+  tm_writer(locale_ref loc, bool localized, OutputIt out, const std::tm& tm,
             const Duration* subsecs = nullptr)
       : loc_(loc),
-        is_classic_(is_classic_locale(loc)),
+        localized_(localized),
+        is_classic_(is_classic_locale(loc, localized)),
         out_(out),
         subsecs_(subsecs),
         tm_(tm) {}
@@ -1711,7 +1722,7 @@ struct duration_formatter {
   template <typename Callback, typename... Args>
   void format_tm(const tm& time, Callback cb, Args... args) {
     if (isnan(val)) return write_nan();
-    auto w = tm_writer_type(localized ? locale : locale_ref(), out, time);
+    auto w = tm_writer_type(locale, localized, out, time);
     (w.*cb)(args...);
     out = w.out();
   }
@@ -1930,8 +1941,8 @@ struct formatter<weekday, Char> : private formatter<std::tm, Char> {
     auto time = std::tm();
     time.tm_wday = static_cast<int>(wd.c_encoding());
     if (use_tm_formatter_) return formatter<std::tm, Char>::format(time, ctx);
-    auto loc = this->localized() ? ctx.locale() : locale_ref();
-    auto w = detail::tm_writer<decltype(ctx.out()), Char>(loc, ctx.out(), time);
+    auto w = detail::tm_writer<decltype(ctx.out()), Char>(
+        ctx.locale(), this->localized(), ctx.out(), time);
     w.on_abbr_weekday();
     return w.out();
   }
@@ -1954,8 +1965,8 @@ struct formatter<day, Char> : private formatter<std::tm, Char> {
     auto time = std::tm();
     time.tm_mday = static_cast<int>(static_cast<unsigned>(d));
     if (use_tm_formatter_) return formatter<std::tm, Char>::format(time, ctx);
-    auto loc = locale_ref();
-    auto w = detail::tm_writer<decltype(ctx.out()), Char>(loc, ctx.out(), time);
+    auto w = detail::tm_writer<decltype(ctx.out()), Char>(locale_ref(), false,
+                                                          ctx.out(), time);
     w.on_day_of_month(detail::numeric_system::standard, detail::pad_type::zero);
     return w.out();
   }
@@ -1982,8 +1993,8 @@ struct formatter<month, Char> : private formatter<std::tm, Char> {
     auto time = std::tm();
     time.tm_mon = static_cast<int>(static_cast<unsigned>(m)) - 1;
     if (use_tm_formatter_) return formatter<std::tm, Char>::format(time, ctx);
-    auto loc = this->localized() ? ctx.locale() : locale_ref();
-    auto w = detail::tm_writer<decltype(ctx.out()), Char>(loc, ctx.out(), time);
+    auto w = detail::tm_writer<decltype(ctx.out()), Char>(
+        ctx.locale(), this->localized(), ctx.out(), time);
     w.on_abbr_month();
     return w.out();
   }
@@ -2006,8 +2017,8 @@ struct formatter<year, Char> : private formatter<std::tm, Char> {
     auto time = std::tm();
     time.tm_year = static_cast<int>(y) - 1900;
     if (use_tm_formatter_) return formatter<std::tm, Char>::format(time, ctx);
-    auto loc = locale_ref();
-    auto w = detail::tm_writer<decltype(ctx.out()), Char>(loc, ctx.out(), time);
+    auto w = detail::tm_writer<decltype(ctx.out()), Char>(locale_ref(), false,
+                                                          ctx.out(), time);
     w.on_year(detail::numeric_system::standard, detail::pad_type::zero);
     return w.out();
   }
@@ -2033,8 +2044,8 @@ struct formatter<year_month_day, Char> : private formatter<std::tm, Char> {
     time.tm_mon = static_cast<int>(static_cast<unsigned>(val.month())) - 1;
     time.tm_mday = static_cast<int>(static_cast<unsigned>(val.day()));
     if (use_tm_formatter_) return formatter<std::tm, Char>::format(time, ctx);
-    auto loc = ctx.locale();
-    auto w = detail::tm_writer<decltype(ctx.out()), Char>(loc, ctx.out(), time);
+    auto w = detail::tm_writer<decltype(ctx.out()), Char>(locale_ref(), false,
+                                                          ctx.out(), time);
     w.on_iso_date();
     return w.out();
   }
@@ -2154,7 +2165,7 @@ template <typename Char> struct formatter<std::tm, Char> {
 
     auto loc = specs.localized() ? ctx.locale() : locale_ref();
     auto w = detail::tm_writer<basic_appender<Char>, Char, Duration>(
-        loc, out, tm, subsecs);
+        loc, static_cast<bool>(loc), out, tm, subsecs);
     detail::parse_chrono_format(fmt_.begin(), fmt_.end(), w);
     return detail::write(
         ctx.out(), basic_string_view<Char>(buf.data(), buf.size()), specs);
